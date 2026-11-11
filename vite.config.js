@@ -3,6 +3,7 @@ import react from '@vitejs/plugin-react'
 import tailwindcss from '@tailwindcss/vite'
 import { VitePWA } from 'vite-plugin-pwa'
 import { executeJioSaavnRequest } from './functions/api/jiosaavnRouter.js'
+import { fetchSpotifyPlaylist } from './functions/api/spotifyPlaylist.js'
 
 // Helper for local development API handling
 async function handleLocalApi(req, res) {
@@ -24,65 +25,15 @@ async function handleLocalApi(req, res) {
   // 1. Spotify playlist fetcher
   if (pathname === '/api/fetchPlaylist') {
     const playlistUrl = parsedUrl.searchParams.get('playlistUrl');
-    if (!playlistUrl) {
-      res.writeHead(400, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ error: 'Missing playlistUrl' }));
-      return true;
-    }
+    const format = parsedUrl.searchParams.get('format') || 'text';
     try {
-      let finalUrl = playlistUrl;
-      if (finalUrl.includes('spotify.link/') || finalUrl.includes('spoti.fi/') || finalUrl.includes('open.spotify.com/s/')) {
-        const redirectResponse = await fetch(finalUrl, { 
-          redirect: 'manual',
-          headers: { 'User-Agent': 'Mozilla/5.0' }
-        });
-        const location = redirectResponse.headers.get('location');
-        if (location) finalUrl = location;
-      }
-
-      let embedUrl = finalUrl;
-      const matchP = finalUrl.match(/\/playlist\/([a-zA-Z0-9]+)/);
-      const matchA = finalUrl.match(/\/album\/([a-zA-Z0-9]+)/);
-      if (matchP) embedUrl = `https://open.spotify.com/embed/playlist/${matchP[1]}`;
-      else if (matchA) embedUrl = `https://open.spotify.com/embed/album/${matchA[1]}`;
-
-      const spotifyRes = await fetch(embedUrl, {
-        headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36' }
-      });
-      const html = await spotifyRes.text();
-      const tagStart = '<script id="__NEXT_DATA__" type="application/json">';
-      const startIdx = html.indexOf(tagStart);
-      if (startIdx !== -1) {
-        const jsonStart = startIdx + tagStart.length;
-        const jsonEnd = html.indexOf('</script>', jsonStart);
-        const parsed = JSON.parse(html.substring(jsonStart, jsonEnd));
-        const trackList = parsed?.props?.pageProps?.state?.data?.entity?.trackList || [];
-        const format = parsedUrl.searchParams.get('format');
-        if (format === 'json') {
-          const formattedJson = trackList.map((t, index) => ({
-            rank: index + 1,
-            id: t.uid || t.id || `track_${index}`,
-            title: t.title,
-            artists: t.subtitle,
-            albumArt: t.coverArt?.sources?.[0]?.url || '',
-            durationMs: t.duration || 0,
-            previewUrl: t.audioPreview?.url || null
-          }));
-          res.writeHead(200, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({
-            name: parsed?.props?.pageProps?.state?.data?.entity?.name || 'Playlist',
-            tracks: formattedJson
-          }));
-          return true;
-        }
-        const formattedTracks = trackList.map(t => `${t.title} - ${t.subtitle}`).join('\n');
-        res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ tracks: formattedTracks }));
-        return true;
-      }
+      const data = await fetchSpotifyPlaylist(playlistUrl, format);
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify(format === 'json' ? data : { tracks: data.tracks }));
+      return true;
     } catch (err) {
       console.error('[Dev API fetchPlaylist Error]:', err);
-      res.writeHead(500, { 'Content-Type': 'application/json' });
+      res.writeHead(err.status || 500, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ error: err.message }));
       return true;
     }

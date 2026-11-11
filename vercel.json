@@ -1,0 +1,12 @@
+{
+  "rewrites": [
+    {
+      "source": "/api/((?!fetchPlaylist|groqCurate|deezer|jiosaavn).*)",
+      "destination": "/api/jiosaavn?endpoint=$1"
+    },
+    {
+      "source": "/((?!api/).*)",
+      "destination": "/index.html"
+    }
+  ]
+}

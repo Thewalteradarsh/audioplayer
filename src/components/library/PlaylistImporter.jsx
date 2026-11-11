@@ -43,9 +43,11 @@ export default function PlaylistImporter({ isOpen, onClose }) {
         const data = await response.json();
         if (data.name) setPlaylistName(data.name);
         if (Array.isArray(data.tracks)) {
-          tracksString = data.tracks.map(t => `${t.title} - ${t.artists}`).join('\n');
+          tracksString = data.tracks
+            .map(t => `${String(t.title || '').replace(/\u00a0/g, ' ')} - ${String(t.artists || '').replace(/\u00a0/g, ' ')}`)
+            .join('\n');
         } else if (typeof data.tracks === 'string') {
-          tracksString = data.tracks;
+          tracksString = data.tracks.replace(/\u00a0/g, ' ');
         }
       } else if (url.includes('jiosaavn.com/')) {
         const res = await api.get('playlists', { params: { link: url } });
@@ -89,10 +91,14 @@ export default function PlaylistImporter({ isOpen, onClose }) {
       try {
         let query = line;
         let artistHint = '';
-        if (line.includes('-')) {
-          const parts = line.split('-');
-          query = parts[0].trim();
-          artistHint = parts[1].trim().toLowerCase();
+        const sepIdx = line.lastIndexOf(' - ');
+        if (sepIdx > 0) {
+          query = line.slice(0, sepIdx).trim();
+          artistHint = line.slice(sepIdx + 3).trim().toLowerCase();
+        } else if (line.includes('-')) {
+          const fallbackIdx = line.lastIndexOf('-');
+          query = line.slice(0, fallbackIdx).trim();
+          artistHint = line.slice(fallbackIdx + 1).trim().toLowerCase();
         }
 
         const data = await api.searchSongs(query, 1, 10);
@@ -213,10 +219,10 @@ export default function PlaylistImporter({ isOpen, onClose }) {
                 onChange={(e) => setPlaylistName(e.target.value)}
               />
 
-              <div className="relative">
+              <div className="relative flex gap-2">
                 <input 
                   type="text" 
-                  className="w-full bg-[#1a1a1a] border border-[#333] rounded-md p-3 pr-10 text-white text-sm focus:border-primary focus:outline-none placeholder-grayText/50"
+                  className="flex-1 min-w-0 bg-[#1a1a1a] border border-[#333] rounded-md p-3 pr-10 text-white text-sm focus:border-primary focus:outline-none placeholder-grayText/50"
                   placeholder="Enter Spotify or JioSaavn Playlist URL..."
                   value={playlistUrl}
                   onChange={(e) => {
@@ -226,10 +232,20 @@ export default function PlaylistImporter({ isOpen, onClose }) {
                     }
                   }}
                 />
-                {isFetchingUrl && (
+                {isFetchingUrl ? (
                   <div className="absolute right-3 top-3 text-primary animate-spin">
                     <Loader2 size={20} />
                   </div>
+                ) : (
+                  playlistUrl.trim() && (
+                    <button
+                      type="button"
+                      onClick={() => handleUrlFetch(playlistUrl)}
+                      className="px-3.5 rounded-md bg-white/10 hover:bg-white/20 text-white text-xs font-bold cursor-pointer flex-shrink-0 transition-colors"
+                    >
+                      Load
+                    </button>
+                  )
                 )}
               </div>
 

@@ -111,7 +111,7 @@ export async function executeJioSaavnRequest(endpoint, queryParams = {}, signal)
       params.forEach((value, key) => targetUrl.searchParams.append(key, value));
 
       const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 4000); // 4s fast timeout per mirror
+      const timeoutId = setTimeout(() => controller.abort(), 1800); // 1.8s fast timeout per mirror to avoid serverless timeout
 
       const res = await fetch(targetUrl.toString(), {
         headers: {
