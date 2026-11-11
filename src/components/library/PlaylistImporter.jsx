@@ -1,44 +1,60 @@
 import { useState } from 'react';
-import { api } from '../../utils/apiClient';
 import { useAppStore } from '../../store/useAppStore';
+import { api } from '../../utils/apiClient';
+import { getAudioStreamUrl } from '../../utils/audioHelper';
 import PlaylistCover from './PlaylistCover';
 import { Download, X, CheckCircle, AlertCircle, Loader2 } from 'lucide-react';
 
-
 export default function PlaylistImporter({ isOpen, onClose }) {
+  const [playlistName, setPlaylistName] = useState('Imported Mix');
   const [inputText, setInputText] = useState('');
   const [playlistUrl, setPlaylistUrl] = useState('');
   const [isFetchingUrl, setIsFetchingUrl] = useState(false);
   const [isImporting, setIsImporting] = useState(false);
+  const [errorMsg, setErrorMsg] = useState('');
   const [progress, setProgress] = useState({ current: 0, total: 0, failed: 0 });
   const [importedPlaylist, setImportedPlaylist] = useState(null);
+
+  const handleClose = () => {
+    if (isImporting) return;
+    setImportedPlaylist(null);
+    setInputText('');
+    setPlaylistUrl('');
+    setPlaylistName('Imported Mix');
+    setErrorMsg('');
+    onClose();
+  };
 
   const handleUrlFetch = async (url) => {
     if (!/(open\.spotify\.com\/(playlist|s|album)\/|spotify\.link\/|spoti\.fi\/|jiosaavn\.com\/)/i.test(url)) return;
     
     setIsFetchingUrl(true);
+    setErrorMsg('');
     try {
       let tracksString = '';
 
       if (/(open\.spotify\.com\/(playlist|s|album)\/|spotify\.link\/|spoti\.fi\/)/i.test(url)) {
-        const apiUrl = `/api/fetchPlaylist?playlistUrl=${encodeURIComponent(url)}`;
+        const apiUrl = `/api/fetchPlaylist?format=json&playlistUrl=${encodeURIComponent(url)}`;
         const response = await fetch(apiUrl, {
           headers: { 'X-App-Client': 'HearApp' }
         });
         if (!response.ok) throw new Error(`Spotify fetch failed: ${response.status}`);
         const data = await response.json();
-        tracksString = data.tracks;
+        if (data.name) setPlaylistName(data.name);
+        if (Array.isArray(data.tracks)) {
+          tracksString = data.tracks.map(t => `${t.title} - ${t.artists}`).join('\n');
+        } else if (typeof data.tracks === 'string') {
+          tracksString = data.tracks;
+        }
       } else if (url.includes('jiosaavn.com/')) {
-        // Use our new resilient JioSaavn proxy queue
-        const apiUrl = `/api/jiosaavn?endpoint=playlists&link=${encodeURIComponent(url)}`;
-        const response = await fetch(apiUrl, { headers: { 'x-app-client': 'HearApp' } });
-        if (!response.ok) throw new Error(`JioSaavn fetch failed: ${response.status}`);
-        const data = await response.json();
-        const playlistData = data?.data || data;
-        
-        if (playlistData && playlistData.songs) {
-          // Format exactly like the Spotify scraper: "Title - Artist"
-          tracksString = playlistData.songs.map(s => `${s.title || s.name} - ${s.primaryArtists || ''}`).join('\n');
+        const res = await api.get('playlists', { params: { link: url } });
+        const playlistData = res?.data || res;
+        if (playlistData?.title || playlistData?.name) {
+          setPlaylistName(playlistData.title || playlistData.name);
+        }
+        const songs = playlistData?.songs || res?.results || [];
+        if (songs.length > 0) {
+          tracksString = songs.map(s => `${s.title || s.name} - ${s.primaryArtists || s.artist?.name || ''}`).join('\n');
         } else {
           throw new Error("Could not parse songs from JioSaavn playlist.");
         }
@@ -46,26 +62,28 @@ export default function PlaylistImporter({ isOpen, onClose }) {
 
       if (tracksString) {
         setInputText(prev => prev ? prev + '\n' + tracksString : tracksString);
-        setPlaylistUrl(''); // Clear input after successful fetch
+        setPlaylistUrl('');
       }
     } catch (err) {
       console.error("Failed to fetch playlist", err);
+      setErrorMsg(err.message || 'Could not load playlist from URL.');
+    } finally {
       setIsFetchingUrl(false);
     }
   };
 
   const handleImport = async () => {
-    if (!inputText.trim()) return;
+    if (!inputText.trim() || isImporting) return;
     
     const lines = inputText.split('\n').map(l => l.trim()).filter(l => l.length > 0);
     if (lines.length === 0) return;
 
     setIsImporting(true);
+    setErrorMsg('');
     setProgress({ current: 0, total: lines.length, failed: 0 });
     const resolvedTracks = [];
     let failures = 0;
 
-    // Crash-Proof Iteration Loop
     for (const [index, line] of lines.entries()) {
       try {
         let query = line;
@@ -76,15 +94,10 @@ export default function PlaylistImporter({ isOpen, onClose }) {
           artistHint = parts[1].trim().toLowerCase();
         }
 
-        // Fetch top 10 results from JioSaavn API Queue for better English song coverage
-        const res = await fetch(`/api/jiosaavn?endpoint=search/songs&query=${encodeURIComponent(query)}&limit=10`, {
-          headers: { 'x-app-client': 'HearApp' }
-        });
-        const data = await res.json();
-        
+        const data = await api.searchSongs(query, 1, 10);
         const results = data?.data?.results || data?.results || data?.data || [];
         
-        // 1. Negative Keyword Filter (Rejects bad audio)
+        // Negative Keyword Filter
         const negativePattern = /karaoke|cover|sped up|tribute|lofi|zzang|originally performed|instrumental/i;
         const filteredResults = results.filter(r => {
            const title = r.title || r.name || '';
@@ -93,75 +106,110 @@ export default function PlaylistImporter({ isOpen, onClose }) {
            return !negativePattern.test(text);
         });
 
-        // 2. Precision Artist Validation Check
-        let finalTrack = filteredResults[0]; 
+        // Precision Artist Validation
+        let finalTrack = filteredResults[0] || results[0];
         if (artistHint && filteredResults.length > 0) {
            const exactMatch = filteredResults.find(r => {
              const artists = (r.artist?.name || r.primaryArtists || '').toLowerCase();
-             // Safe optional chaining string match
              return artists.includes(artistHint) || artistHint.includes(artists);
            });
            if (exactMatch) finalTrack = exactMatch;
         }
 
         if (finalTrack) {
-           // Normalize JioSaavn schema to standard App Schema (Deezer-like)
+           const resolvedUrl = getAudioStreamUrl(finalTrack);
+           const img500 = finalTrack.album?.cover_xl || finalTrack.album?.cover || finalTrack.image?.[2]?.url || finalTrack.image?.[2]?.link || finalTrack.image?.[0]?.url || finalTrack.image?.[0]?.link || '';
            const normalizedTrack = {
+             ...finalTrack,
              id: finalTrack.id,
              title: finalTrack.title || finalTrack.name,
+             name: finalTrack.title || finalTrack.name,
              artist: { name: finalTrack.artist?.name || finalTrack.primaryArtists },
+             primaryArtists: finalTrack.artist?.name || finalTrack.primaryArtists,
              album: { 
                title: finalTrack.album?.title || finalTrack.album?.name || '',
-               cover_medium: finalTrack.album?.cover_medium || finalTrack.image?.[2]?.link || finalTrack.image?.[1]?.link || finalTrack.image?.[0]?.link || ''
+               name: finalTrack.album?.title || finalTrack.album?.name || '',
+               cover_medium: finalTrack.album?.cover_medium || img500,
+               cover_xl: img500,
+               cover: img500
              },
-             preview: finalTrack.preview || finalTrack.downloadUrl?.[2]?.link || ''
+             image: finalTrack.image,
+             downloadUrl: finalTrack.downloadUrl,
+             preview: resolvedUrl || finalTrack.preview || ''
            };
            resolvedTracks.push(normalizedTrack);
         } else {
            failures++;
         }
       } catch (err) {
-        // Log individual track failure, but CONTINUE loop. Never crash.
         console.error(`[Importer] Failed on track "${line}":`, err);
         failures++;
       }
       
-      // Update UI Progress dynamically
       setProgress({ current: index + 1, total: lines.length, failed: failures });
     }
 
     if (resolvedTracks.length > 0) {
        const newPlaylist = {
          id: `imported_${Date.now()}`,
-         name: "Imported Spotify Mix",
+         name: playlistName.trim() || "Imported Mix",
          tracks: resolvedTracks
        };
        useAppStore.getState().savePlaylist(newPlaylist);
        setImportedPlaylist(newPlaylist);
+    } else {
+       setErrorMsg('No matching tracks could be resolved. Try simplifying track titles.');
     }
     
-
     setIsImporting(false);
   };
 
   if (!isOpen) return null;
 
   return (
-    <div className="fixed inset-0 bg-black/80 backdrop-blur-sm z-[100] flex items-center justify-center p-4">
-      <div className="bg-[#121212] border border-[#282828] w-full max-w-lg rounded-xl shadow-2xl p-6 relative flex flex-col max-h-[90vh]">
+    <div
+      className="fixed inset-0 bg-black/80 backdrop-blur-sm z-[120] flex items-end sm:items-center justify-center p-0 sm:p-4"
+      onClick={handleClose}
+    >
+      <div
+        className="bg-[#121212] border-t sm:border border-[#282828] w-full sm:max-w-lg rounded-t-2xl sm:rounded-xl shadow-2xl p-5 sm:p-6 relative flex flex-col max-h-[92dvh] overflow-y-auto"
+        onClick={(e) => e.stopPropagation()}
+      >
         
-        <button onClick={onClose} className="absolute top-4 right-4 text-grayText hover:text-white" disabled={isImporting}>
+        <button
+          type="button"
+          onClick={handleClose}
+          className="absolute top-4 right-4 text-grayText hover:text-white cursor-pointer disabled:opacity-40"
+          disabled={isImporting}
+          aria-label="Close importer"
+        >
            <X size={24} />
         </button>
 
         <h2 className="text-2xl font-bold mb-2 flex items-center gap-2"><Download className="text-primary"/> Import Playlist</h2>
-        <p className="text-grayText text-sm mb-6">
-          To import a playlist, paste a Spotify or JioSaavn playlist URL, or paste a list of tracks below. We use resilient API queues and precision matching to automatically find and link the high-quality audio streams.
+        <p className="text-grayText text-sm mb-4">
+          Paste a Spotify or JioSaavn playlist URL, or paste a list of tracks (`Song - Artist`) below.
         </p>
+
+        {errorMsg && (
+          <div className="mb-4 text-xs text-red-400 bg-red-500/10 border border-red-500/20 rounded-md px-3 py-2">
+            {errorMsg}
+          </div>
+        )}
 
         {!isImporting && !importedPlaylist && (
           <>
-            <div className="mb-4 relative">
+            <div className="mb-3">
+              <input
+                type="text"
+                className="w-full bg-[#1a1a1a] border border-[#333] rounded-md px-3 py-2.5 text-white text-sm focus:border-primary focus:outline-none placeholder-grayText/50"
+                placeholder="Playlist Name"
+                value={playlistName}
+                onChange={(e) => setPlaylistName(e.target.value)}
+              />
+            </div>
+
+            <div className="mb-3 relative">
               <input 
                 type="text" 
                 className="w-full bg-[#1a1a1a] border border-[#333] rounded-md p-3 pr-10 text-white text-sm focus:border-primary focus:outline-none placeholder-grayText/50"
@@ -182,14 +230,20 @@ export default function PlaylistImporter({ isOpen, onClose }) {
             </div>
 
             <textarea 
-              className="w-full h-48 bg-[#1a1a1a] border border-[#333] rounded-md p-3 text-white text-sm custom-scrollbar mb-4 focus:border-primary focus:outline-none placeholder-grayText/50"
+              className="w-full h-40 bg-[#1a1a1a] border border-[#333] rounded-md p-3 text-white text-sm custom-scrollbar mb-4 focus:border-primary focus:outline-none placeholder-grayText/50"
               placeholder={`Blinding Lights - The Weeknd\nShape of You - Ed Sheeran\n...`}
               value={inputText}
               onChange={(e) => setInputText(e.target.value)}
             />
             <button 
+              type="button"
+              disabled={!inputText.trim() || isFetchingUrl}
               onClick={handleImport}
-              className="w-full py-3 rounded-full bg-primary text-black font-bold hover:scale-[1.02] transition-transform"
+              className={`w-full py-3 rounded-full font-bold transition-all ${
+                inputText.trim() && !isFetchingUrl
+                  ? 'bg-primary text-black hover:scale-[1.02] cursor-pointer'
+                  : 'bg-[#2a2a2a] text-[#777] cursor-not-allowed'
+              }`}
             >
               Start Hardened Import
             </button>
@@ -211,7 +265,7 @@ export default function PlaylistImporter({ isOpen, onClose }) {
           <div className="flex flex-col items-center py-6 gap-4 text-center animate-in zoom-in duration-300">
              <CheckCircle size={56} className="text-green-500" />
              <h3 className="text-2xl font-bold">Import Successful!</h3>
-             <p className="text-grayText font-medium">{importedPlaylist.tracks.length} tracks matched and saved.</p>
+             <p className="text-grayText font-medium">{importedPlaylist.tracks.length} tracks matched and saved to "{importedPlaylist.name}".</p>
              
              {progress.failed > 0 && (
                 <p className="text-sm text-yellow-500 flex items-center justify-center gap-1 bg-yellow-500/10 py-2 px-4 rounded-md w-full"><AlertCircle size={14}/> {progress.failed} tracks were skipped due to missing streams or karaoke matches.</p>
@@ -222,8 +276,9 @@ export default function PlaylistImporter({ isOpen, onClose }) {
              </div>
 
              <button 
-              onClick={onClose}
-              className="mt-4 w-full py-3 rounded-full bg-[#282828] text-white font-bold hover:bg-[#333] transition-colors"
+              type="button"
+              onClick={handleClose}
+              className="mt-4 w-full py-3 rounded-full bg-[#282828] text-white font-bold hover:bg-[#333] transition-colors cursor-pointer"
              >
               Close & View Library
              </button>

@@ -1,15 +1,19 @@
 import { useAppStore } from '../store/useAppStore';
 import { syncMediaSession } from './MediaSessionSync';
 import { OfflineStorage } from './OfflineStorage';
+import { getAudioStreamUrl } from '../utils/audioHelper';
+import { api } from '../utils/apiClient';
 
 class AudioEngineSingleton {
   constructor() {
     this.audio = new Audio();
     this.audio.preload = 'auto';
-    this.audio.crossOrigin = 'anonymous'; // Important for certain streaming domains
+    // Removed crossOrigin="anonymous" to avoid CORS preflight rejection by JioSaavn CDN (aac.saavncdn.com)
+    this.audio.volume = useAppStore.getState().playbackState.volume ?? 1;
     
     // Internal state
     this.currentTrackId = null;
+    this._loadSeq = 0;
     this.historyTimer = null;
     this.historyLogged = false;
     this.animationFrameId = null;
@@ -31,7 +35,9 @@ class AudioEngineSingleton {
     });
 
     this.audio.addEventListener('pause', () => {
-      useAppStore.getState().setStatus('PAUSED');
+      if (!this.audio.ended) {
+        useAppStore.getState().setStatus('PAUSED');
+      }
       this._pauseHistoryTimer();
     });
 
@@ -45,25 +51,80 @@ class AudioEngineSingleton {
       useAppStore.getState().playNext();
     });
 
+    this.audio.addEventListener('canplay', () => {
+      console.info('[AudioEngine] Can play track:', this.audio.src);
+    });
+
     this.audio.addEventListener('error', (e) => {
-      console.error("[AudioEngine] Playback Error:", e);
-      // Fallback Strategy: If 320kbps fails, drop to 160kbps
-      if (this.audio.src.includes('320')) {
-         console.warn("[AudioEngine] Falling back to 160kbps stream...");
-         this.audio.src = this.audio.src.replace('320', '160');
-         this.audio.play().catch(err => this._handleFatalError(err));
+      if (!this.audio.getAttribute('src')) return;
+      const mediaErr = this.audio.error;
+      console.error("[AudioEngine] Playback Error:", {
+        code: mediaErr?.code,
+        message: mediaErr?.message,
+        src: this.audio.src,
+        event: e
+      });
+
+      // Fallback Strategy: If 320kbps fails, drop to 160kbps, then 96kbps
+      if (this.audio.src && this.audio.src.includes('_320.')) {
+         console.warn("[AudioEngine] 320kbps stream failed. Falling back to 160kbps stream...");
+         this.audio.src = this.audio.src.replace('_320.', '_160.');
+         this.audio.load();
+         this.audio.play().catch(err => {
+           if (err.name === 'AbortError') return;
+           console.error("[AudioEngine] 160kbps fallback play failed:", err);
+           this._handleFatalError(err);
+         });
+      } else if (this.audio.src && this.audio.src.includes('_160.')) {
+         console.warn("[AudioEngine] 160kbps stream failed. Falling back to 96kbps stream...");
+         this.audio.src = this.audio.src.replace('_160.', '_96.');
+         this.audio.load();
+         this.audio.play().catch(err => {
+           if (err.name === 'AbortError') return;
+           console.error("[AudioEngine] 96kbps fallback play failed:", err);
+           this._handleFatalError(err);
+         });
       } else {
          this._handleFatalError(e);
       }
     });
 
+    // Update duration from audio.duration with fallback to store/API duration
     this.audio.addEventListener('loadedmetadata', () => {
-      useAppStore.getState().setDuration(this.audio.duration);
+      const dur = this.audio.duration;
+      const currentTrack = useAppStore.getState().playbackState.currentTrack;
+      if (Number.isFinite(dur) && dur > 0) {
+        useAppStore.getState().setDuration(dur);
+      } else if (currentTrack?.duration && Number(currentTrack.duration) > 0) {
+        useAppStore.getState().setDuration(Number(currentTrack.duration));
+      }
     });
 
-    // Throttled timeupdate (max 2fps) using requestAnimationFrame to prevent React thrashing
+    this.audio.addEventListener('durationchange', () => {
+      const dur = this.audio.duration;
+      if (Number.isFinite(dur) && dur > 0) {
+        useAppStore.getState().setDuration(dur);
+      }
+    });
+
+    // Native timeupdate listener ensures backgrounded tabs and lock screen reflect accurate time
+    this.audio.addEventListener('timeupdate', () => {
+      if (Number.isFinite(this.audio.currentTime)) {
+        useAppStore.getState().setProgress(this.audio.currentTime);
+      }
+      if (
+        !this.audio.paused &&
+        !this.audio.ended &&
+        this.audio.readyState >= 2 &&
+        useAppStore.getState().playbackState.status === 'LOADING'
+      ) {
+        useAppStore.getState().setStatus('PLAYING');
+      }
+    });
+
+    // Throttled UI progress updater for high-frequency smooth rendering
     const updateProgress = (timestamp) => {
-      if (timestamp - this.lastUpdateTime > 500) {
+      if (timestamp - this.lastUpdateTime > 250) {
         useAppStore.getState().setProgress(this.audio.currentTime);
         this.lastUpdateTime = timestamp;
       }
@@ -81,7 +142,7 @@ class AudioEngineSingleton {
     });
   }
 
-  _handleFatalError(e) {
+  _handleFatalError(_e) {
       this.consecutiveFailures++;
       useAppStore.getState().setStatus('ERROR');
       this._clearHistoryTimer();
@@ -98,19 +159,59 @@ class AudioEngineSingleton {
       }, 2000);
   }
 
+  _stopAndClear() {
+    this._loadSeq++;
+    this.currentTrackId = null;
+    this.audio.pause();
+    this.audio.removeAttribute('src');
+    this.audio.load();
+    this._clearHistoryTimer();
+    if (this.currentObjectUrl) {
+      URL.revokeObjectURL(this.currentObjectUrl);
+      this.currentObjectUrl = null;
+    }
+  }
+
   _subscribeToStore() {
-    // Listen for currentTrack changes via Zustand subscription
+    // Listen for track changes OR explicit play/replay requests
     useAppStore.subscribe(
-      (state) => state.playbackState.currentTrack,
-      (newTrack, oldTrack) => {
+      (state) => `${state.playbackState.currentTrack?.id || ''}::${state.playbackState.playRequestId}`,
+      () => {
+        const newTrack = useAppStore.getState().playbackState.currentTrack;
         if (!newTrack) {
-          this.audio.pause();
-          this.audio.src = '';
+          this._stopAndClear();
           return;
         }
+        this._loadAndPlay(newTrack);
+      }
+    );
 
-        if (oldTrack?.id !== newTrack.id) {
-          this._loadAndPlay(newTrack);
+    // Listen for rewind-to-zero triggers (SkipBack after >3s or Repeat One)
+    useAppStore.subscribe(
+      (state) => state.playbackState.seekZeroSeq,
+      (seq) => {
+        if (seq === 0) return;
+        if (this.audio.getAttribute('src')) {
+          this.audio.currentTime = 0;
+          useAppStore.getState().setProgress(0);
+          if (this.audio.paused && useAppStore.getState().playbackState.status === 'LOADING') {
+            this.audio.play().catch(err => {
+              if (err.name !== 'AbortError') {
+                console.warn('[AudioEngine] Rewind play failed:', err);
+              }
+            });
+          }
+        }
+      }
+    );
+
+    // Pause audio cleanly if playback state transitions to IDLE
+    useAppStore.subscribe(
+      (state) => state.playbackState.status,
+      (status) => {
+        if (status === 'IDLE' && !this.audio.paused) {
+          this.audio.pause();
+          this._pauseHistoryTimer();
         }
       }
     );
@@ -119,15 +220,47 @@ class AudioEngineSingleton {
     useAppStore.subscribe(
       (state) => state.playbackState.volume,
       (volume) => {
-        this.audio.volume = volume;
+        const numeric = Number(volume);
+        this.audio.volume = Math.max(0, Math.min(1, Number.isFinite(numeric) ? numeric : 1));
       }
     );
   }
 
   async _loadAndPlay(track) {
-    this.currentTrackId = track.id;
+    if (!track) return;
+    const loadId = ++this._loadSeq;
     this._clearHistoryTimer();
     this.historyLogged = false;
+
+    // Fast path: if the same track is already loaded cleanly, just rewind and play
+    if (
+      this.currentTrackId === track.id &&
+      this.audio.getAttribute('src') &&
+      !this.audio.error &&
+      this.audio.readyState >= 1
+    ) {
+      this.audio.currentTime = 0;
+      useAppStore.getState().setProgress(0);
+      useAppStore.getState().setStatus(this.audio.readyState >= 3 ? 'PLAYING' : 'LOADING');
+      try {
+        await this.audio.play();
+      } catch (err) {
+        if (err.name !== 'AbortError' && !err.message?.includes('interrupted')) {
+          console.error('[AudioEngine] Re-trigger play() failed:', err);
+        }
+      }
+      return;
+    }
+
+    this.currentTrackId = track.id;
+
+    // Reset progress to 0 and set loading status
+    useAppStore.getState().setProgress(0);
+    useAppStore.getState().setStatus('LOADING');
+
+    // Pre-set duration from track metadata if available
+    const initialDuration = Number(track.duration) || 0;
+    useAppStore.getState().setDuration(initialDuration > 0 ? initialDuration : 0);
 
     // Clean up previous object URL if any
     if (this.currentObjectUrl) {
@@ -139,68 +272,102 @@ class AudioEngineSingleton {
     let streamUrl = null;
     try {
       const audioBlob = await OfflineStorage.getTrackAudio(track.id);
+      if (loadId !== this._loadSeq) return;
       if (audioBlob) {
         streamUrl = URL.createObjectURL(audioBlob);
         this.currentObjectUrl = streamUrl;
-
       }
     } catch (e) {
       console.error("[AudioEngine] Error checking offline storage:", e);
     }
 
-    // 2. Fallback to Network
+    if (loadId !== this._loadSeq) return;
+
+    // 2. Extract valid stream URL from all API formats
+    let activeTrack = track;
     if (!streamUrl) {
-      if (track.preview) {
-        streamUrl = track.preview;
-      } else if (Array.isArray(track.downloadUrl)) {
-        const highRes = track.downloadUrl.find(u => u.quality === '320kbps');
-        const standardRes = track.downloadUrl.find(u => u.quality === '160kbps');
-        streamUrl = highRes?.url || standardRes?.url || track.downloadUrl[0]?.url;
-      } else if (typeof track.downloadUrl === 'string') {
-        streamUrl = track.downloadUrl;
-      } else if (track.media_url) {
-        streamUrl = track.media_url;
+      streamUrl = getAudioStreamUrl(activeTrack);
+    }
+
+    // 3. If stream URL is missing, automatically fetch full song details via API
+    if (!streamUrl && track.id) {
+      console.info(`[AudioEngine] Stream URL missing for "${track.name || track.title}" (ID: ${track.id}). Fetching full details...`);
+      try {
+        const res = await api.getSong(track.id);
+        if (loadId !== this._loadSeq) return;
+        const fullTrack = Array.isArray(res.data) ? res.data[0] : (res.data?.results?.[0] || res.results?.[0] || res.data);
+        if (fullTrack) {
+          activeTrack = { ...track, ...fullTrack };
+          streamUrl = getAudioStreamUrl(activeTrack);
+          console.info(`[AudioEngine] Retrieved full track details. Resolved stream URL:`, streamUrl);
+        }
+      } catch (err) {
+        console.warn(`[AudioEngine] Failed to fetch full song details for ID ${track.id}:`, err);
       }
     }
+
+    if (loadId !== this._loadSeq) return;
 
     if (!streamUrl) {
       console.error("[AudioEngine] No valid stream URL found for track:", track);
-      this._handleFatalError();
+      this._handleFatalError(new Error('No valid stream URL found'));
       return;
     }
     
+    console.info(`[AudioEngine] Setting stream URL for "${activeTrack.name || activeTrack.title}":`, streamUrl);
     this.audio.src = streamUrl;
+    this.audio.load();
     
-    this.audio.play().catch(err => {
-      if (err.name === 'AbortError' || err.message.includes('interrupted')) {
+    try {
+      await this.audio.play();
+      if (loadId !== this._loadSeq) return;
+      console.info(`[AudioEngine] Playback started successfully for "${activeTrack.name || activeTrack.title}"`);
+    } catch (err) {
+      if (loadId !== this._loadSeq || err.name === 'AbortError' || err.message?.includes('interrupted')) {
         console.warn('[AudioEngine] Playback interrupted by rapid skipping. Ignoring.');
         return;
       }
-      console.error("[AudioEngine] Autoplay prevented or failed:", err);
+      console.error("[AudioEngine] Playback play() failed:", err);
       useAppStore.getState().setStatus('ERROR');
       this._handleFatalError(err);
-    });
+    }
 
     // Sync OS Media Session Metadata
-    syncMediaSession(track);
+    syncMediaSession(activeTrack);
   }
 
   // --- External Actions ---
   togglePlayPause() {
-    if (!this.audio.src) return;
+    const { currentTrack, status } = useAppStore.getState().playbackState;
+    if (!currentTrack) return;
+
+    const hasSrc = Boolean(this.audio.getAttribute('src'));
+    if (!hasSrc || this.currentTrackId !== currentTrack.id || status === 'ERROR') {
+      this._loadAndPlay(currentTrack);
+      return;
+    }
     
-    if (this.audio.paused) {
-      this.audio.play();
+    if (this.audio.paused || this.audio.ended) {
+      useAppStore.getState().setStatus(this.audio.readyState >= 3 ? 'PLAYING' : 'LOADING');
+      this.audio.play().catch(err => {
+        if (err.name === 'AbortError' || err.message?.includes('interrupted')) return;
+        console.error('[AudioEngine] togglePlayPause resume failed:', err);
+        useAppStore.getState().setStatus('PAUSED');
+      });
     } else {
       this.audio.pause();
     }
   }
 
   seekTo(seconds) {
-    if (this.audio.src && Number.isFinite(seconds)) {
-      this.audio.currentTime = seconds;
-      useAppStore.getState().setProgress(seconds);
-    }
+    if (!this.audio.getAttribute('src') || !Number.isFinite(seconds)) return;
+    const currentTrack = useAppStore.getState().playbackState.currentTrack;
+    const maxDur = Number.isFinite(this.audio.duration) && this.audio.duration > 0
+      ? this.audio.duration
+      : (Number(currentTrack?.duration) || seconds);
+    const clamped = Math.max(0, Math.min(maxDur, seconds));
+    this.audio.currentTime = clamped;
+    useAppStore.getState().setProgress(clamped);
   }
 
   // --- History Tracker Logic (30-Second Rule) ---
@@ -231,5 +398,4 @@ class AudioEngineSingleton {
 }
 
 // Export singleton instance.
-// Note: It initializes immediately, binding to the store without requiring a React mount.
 export const AudioEngine = new AudioEngineSingleton();

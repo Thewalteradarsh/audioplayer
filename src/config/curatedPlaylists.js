@@ -147,6 +147,52 @@ export const CURATED_PLAYLISTS = {
       subtitle: 'Late night acoustic heartbeats',
       apiQuery: 'Acoustic pop'
     }
+  ],
+  punjabi: [
+    {
+      id: 'pun_trending_01',
+      category: 'Trending Now 🔥',
+      subtitle: 'Top chart-toppers and viral Punjabi hits',
+      apiQuery: 'Punjabi hits'
+    },
+    {
+      id: 'pun_classics_01',
+      category: 'Timeless Classics 🌴',
+      subtitle: 'Evergreen Punjabi folk and retro gold',
+      apiQuery: 'Punjabi classic'
+    },
+    {
+      id: 'pun_romance_01',
+      category: 'Late Night Romance 💖',
+      subtitle: 'Soulful Punjabi romantic melodies',
+      apiQuery: 'Punjabi romantic'
+    },
+    {
+      id: 'pun_bangers_01',
+      category: 'High-Energy Bangers ⚡',
+      subtitle: 'Bhangra beats and dancefloor anthems',
+      apiQuery: 'Punjabi bhangra'
+    }
+  ],
+  marathi: [
+    {
+      id: 'mar_trending_01',
+      category: 'Trending Now 🔥',
+      subtitle: 'Top trending Marathi tracks',
+      apiQuery: 'Marathi hits'
+    },
+    {
+      id: 'mar_classics_01',
+      category: 'Timeless Classics 🌴',
+      subtitle: 'Golden Marathi Natyasangeet and film melodies',
+      apiQuery: 'Marathi classic'
+    },
+    {
+      id: 'mar_romance_01',
+      category: 'Late Night Romance 💖',
+      subtitle: 'Soulful Marathi romantic tunes',
+      apiQuery: 'Marathi romantic'
+    }
   ]
 };
 

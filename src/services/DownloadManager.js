@@ -1,5 +1,7 @@
 import { useAppStore } from '../store/useAppStore';
 import { OfflineStorage } from './OfflineStorage';
+import { getAudioStreamUrl } from '../utils/audioHelper';
+import { api } from '../utils/apiClient';
 
 class DownloadManagerSingleton {
   constructor() {
@@ -10,16 +12,7 @@ class DownloadManagerSingleton {
    * Helper to get best audio stream URL
    */
   _getStreamUrl(track) {
-    if (Array.isArray(track.downloadUrl)) {
-      const highRes = track.downloadUrl.find(u => u.quality === '320kbps');
-      const standardRes = track.downloadUrl.find(u => u.quality === '160kbps');
-      return highRes?.url || standardRes?.url || track.downloadUrl[0]?.url;
-    } else if (typeof track.downloadUrl === 'string') {
-      return track.downloadUrl;
-    } else if (track.media_url) {
-      return track.media_url;
-    }
-    return null;
+    return getAudioStreamUrl(track);
   }
 
   /**
@@ -35,7 +28,19 @@ class DownloadManagerSingleton {
       return true;
     }
 
-    const streamUrl = this._getStreamUrl(track);
+    let streamUrl = this._getStreamUrl(track);
+    if (!streamUrl && track.id) {
+      try {
+        const res = await api.getSong(track.id);
+        const fullTrack = Array.isArray(res.data) ? res.data[0] : (res.data?.results?.[0] || res.results?.[0] || res.data);
+        if (fullTrack) {
+          streamUrl = this._getStreamUrl({ ...track, ...fullTrack });
+        }
+      } catch (e) {
+        console.warn('[DownloadManager] Failed to resolve full track URL:', e?.message || e);
+      }
+    }
+
     if (!streamUrl) {
       console.error('[DownloadManager] No stream URL for track:', track.id);
       return false;
@@ -58,7 +63,6 @@ class DownloadManagerSingleton {
     } catch (e) {
       console.error(`[DownloadManager] Error downloading ${track.id}:`, e);
       if (retryCount < 2) {
-
         this.activeDownloads.delete(track.id);
         useAppStore.getState().removeDownloadQueue(track.id);
         return this.downloadTrack(track, retryCount + 1);
@@ -74,15 +78,11 @@ class DownloadManagerSingleton {
    * Download an entire playlist (array of tracks)
    */
   async downloadPlaylist(tracks) {
-    // We could do this in parallel, but to avoid browser network congestion, 
-    // we'll do them sequentially or in small batches.
     let successCount = 0;
-    
     for (const track of tracks) {
       const success = await this.downloadTrack(track);
       if (success) successCount++;
     }
-    
     return successCount;
   }
 }

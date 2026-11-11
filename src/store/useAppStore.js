@@ -1,6 +1,7 @@
 import { create } from 'zustand';
-import { persist, createJSONStorage } from 'zustand/middleware';
-import { StorageEngine } from '../services/StorageEngine';
+import { persist, createJSONStorage, subscribeWithSelector } from 'zustand/middleware';
+import { StorageEngine } from '../services/StorageEngine.js';
+import { api as musicApi } from '../utils/apiClient.js';
 
 // Helper to shuffle an array using Fisher-Yates (Unbiased algorithm)
 function shuffleArray(array) {
@@ -45,6 +46,8 @@ const createPlaybackSlice = (set, get) => ({
     volume: 1,
     progress: 0, // In seconds
     duration: 0, // In seconds
+    playRequestId: 0, // Incremented on explicit play/retrigger actions
+    seekZeroSeq: 0, // Incremented when AudioEngine should rewind to 0:00
   },
 
   setStatus: (status) => set((state) => ({
@@ -60,7 +63,7 @@ const createPlaybackSlice = (set, get) => ({
   })),
 
   setVolume: (volume) => set((state) => ({
-    playbackState: { ...state.playbackState, volume }
+    playbackState: { ...state.playbackState, volume: Math.max(0, Math.min(1, Number(volume) || 0)) }
   })),
 
   /**
@@ -68,11 +71,18 @@ const createPlaybackSlice = (set, get) => ({
    * If a new queue context is passed, it overrides the current originalQueue.
    */
   playTrack: (track, queueContext = []) => {
-    const originalQueue = queueContext.length > 0 ? queueContext : get().playbackState.originalQueue;
+    if (!track) return;
+    const prevState = get().playbackState;
+    const originalQueue = queueContext.length > 0 ? queueContext : prevState.originalQueue;
     let newQueue = [...originalQueue];
 
+    // Ensure clicked track exists in queue if originalQueue was empty
+    if (newQueue.length === 0) {
+      newQueue = [track];
+    }
+
     // Apply shuffle logic if active
-    if (get().playbackState.isShuffle) {
+    if (prevState.isShuffle) {
        const trackIndex = newQueue.findIndex(t => t.id === track.id);
        const before = trackIndex !== -1 ? newQueue.slice(0, trackIndex) : [];
        const after = trackIndex !== -1 ? newQueue.slice(trackIndex + 1) : newQueue;
@@ -80,14 +90,20 @@ const createPlaybackSlice = (set, get) => ({
        newQueue = [track, ...shuffleArray([...before, ...after])];
     }
 
+    const updatedHistory = prevState.currentTrack && prevState.currentTrack.id !== track.id
+      ? [...prevState.history, prevState.currentTrack].slice(-50)
+      : prevState.history;
+
     set((state) => ({
       playbackState: { 
         ...state.playbackState, 
         currentTrack: track, 
         queue: newQueue,
-        originalQueue: originalQueue,
+        originalQueue: originalQueue.length > 0 ? originalQueue : newQueue,
+        history: updatedHistory,
         status: 'LOADING',
         progress: 0,
+        playRequestId: state.playbackState.playRequestId + 1,
       }
     }));
   },
@@ -95,9 +111,9 @@ const createPlaybackSlice = (set, get) => ({
   /**
    * Advances the playback state machine to the next logical track.
    */
-  playNext: () => {
+  playNext: async () => {
     const now = Date.now();
-    if (now - lastSkipTime < 400) return;
+    if (now - lastSkipTime < 150) return;
     lastSkipTime = now;
 
     const state = get().playbackState;
@@ -106,9 +122,15 @@ const createPlaybackSlice = (set, get) => ({
     if (!currentTrack) return;
 
     if (repeatMode === 'ONE') {
-      // Re-trigger the same track (handled via progress reset in UI/AudioEngine)
-      set((state) => ({
-        playbackState: { ...state.playbackState, progress: 0, status: 'LOADING' }
+      // Re-trigger the same track (handled via seekZeroSeq & playRequestId in AudioEngine)
+      set((s) => ({
+        playbackState: {
+          ...s.playbackState,
+          progress: 0,
+          status: 'LOADING',
+          seekZeroSeq: s.playbackState.seekZeroSeq + 1,
+          playRequestId: s.playbackState.playRequestId + 1,
+        }
       }));
       return;
     }
@@ -118,43 +140,88 @@ const createPlaybackSlice = (set, get) => ({
 
     if (currentIndex !== -1 && currentIndex < queue.length - 1) {
       nextTrack = queue[currentIndex + 1];
+    } else if (currentIndex === -1 && queue.length > 0) {
+      nextTrack = queue[0];
     } else if (repeatMode === 'ALL' && queue.length > 0) {
       nextTrack = queue[0];
     }
 
     if (nextTrack) {
-      set((state) => ({
+      set((s) => ({
         playbackState: {
-          ...state.playbackState,
+          ...s.playbackState,
           currentTrack: nextTrack,
-          history: [...history, currentTrack],
+          history: [...history, currentTrack].slice(-50),
           status: 'LOADING',
-          progress: 0
+          progress: 0,
+          playRequestId: s.playbackState.playRequestId + 1,
         }
       }));
-    } else {
-      // Reached the end of the queue
-      set((state) => ({
-        playbackState: { ...state.playbackState, status: 'IDLE', progress: 0 }
-      }));
+      return;
     }
+
+    // Reached end of queue with repeat OFF: auto-fetch JioSaavn recommendations
+    if (currentTrack.id) {
+      const originTrackId = currentTrack.id;
+      set((s) => ({
+        playbackState: { ...s.playbackState, status: 'LOADING' }
+      }));
+
+      try {
+        const res = await musicApi.getSongSuggestions(originTrackId, 15);
+        const suggestions = res.data?.results || res.results || (Array.isArray(res.data) ? res.data : []);
+        const existingIds = new Set(get().playbackState.queue.map(t => t.id));
+        const freshSuggestions = suggestions.filter(t => t && t.id && !existingIds.has(t.id));
+
+        // Guard against user changing track while suggestions were fetching
+        if (get().playbackState.currentTrack?.id === originTrackId && freshSuggestions.length > 0) {
+          const recommendedNext = freshSuggestions[0];
+          set((s) => ({
+            playbackState: {
+              ...s.playbackState,
+              currentTrack: recommendedNext,
+              queue: [...s.playbackState.queue, ...freshSuggestions],
+              originalQueue: [...s.playbackState.originalQueue, ...freshSuggestions],
+              history: [...s.playbackState.history, currentTrack].slice(-50),
+              status: 'LOADING',
+              progress: 0,
+              playRequestId: s.playbackState.playRequestId + 1,
+            }
+          }));
+          return;
+        }
+      } catch (err) {
+        console.warn('[PlaybackSlice] Auto-suggestions fetch failed:', err?.message || err);
+      }
+    }
+
+    // Fallback when no suggestions are available (e.g., offline)
+    set((s) => ({
+      playbackState: { ...s.playbackState, status: 'IDLE', progress: 0 }
+    }));
   },
 
   /**
-   * Rewinds the current track, or pops the history stack to go backwards.
+   * Rewinds the current track, or pops the history stack / steps backward in queue.
    */
   playPrevious: () => {
     const now = Date.now();
-    if (now - lastSkipTime < 400) return;
+    if (now - lastSkipTime < 150) return;
     lastSkipTime = now;
 
     const state = get().playbackState;
-    const { history, queue } = state;
+    const { currentTrack, history, queue } = state;
 
-    // If > 3 seconds elapsed, acts as a rewind
+    if (!currentTrack) return;
+
+    // If > 3 seconds elapsed, acts as a rewind to 0:00
     if (state.progress > 3) {
-      set((state) => ({
-        playbackState: { ...state.playbackState, progress: 0 }
+      set((s) => ({
+        playbackState: {
+          ...s.playbackState,
+          progress: 0,
+          seekZeroSeq: s.playbackState.seekZeroSeq + 1,
+        }
       }));
       return;
     }
@@ -162,21 +229,42 @@ const createPlaybackSlice = (set, get) => ({
     if (history.length > 0) {
       const newHistory = [...history];
       const prevTrack = newHistory.pop();
-      set((state) => ({
+      set((s) => ({
         playbackState: {
-          ...state.playbackState,
+          ...s.playbackState,
           currentTrack: prevTrack,
           history: newHistory,
           status: 'LOADING',
-          progress: 0
+          progress: 0,
+          playRequestId: s.playbackState.playRequestId + 1,
         }
       }));
-    } else if (queue.length > 0) {
-      // Restart current track if no history exists
-      set((state) => ({
-        playbackState: { ...state.playbackState, progress: 0 }
-      }));
+      return;
     }
+
+    const currentIndex = queue.findIndex(t => t.id === currentTrack.id);
+    if (currentIndex > 0) {
+      const prevTrack = queue[currentIndex - 1];
+      set((s) => ({
+        playbackState: {
+          ...s.playbackState,
+          currentTrack: prevTrack,
+          status: 'LOADING',
+          progress: 0,
+          playRequestId: s.playbackState.playRequestId + 1,
+        }
+      }));
+      return;
+    }
+
+    // Restart current track at 0:00 when at beginning of queue with no history
+    set((s) => ({
+      playbackState: {
+        ...s.playbackState,
+        progress: 0,
+        seekZeroSeq: s.playbackState.seekZeroSeq + 1,
+      }
+    }));
   },
 
   toggleShuffle: () => {
@@ -225,6 +313,9 @@ const createLibrarySlice = (set) => ({
   savePlaylist: (playlist) => set((state) => ({
     library: { ...state.library, playlists: [playlist, ...state.library.playlists] }
   })),
+  removePlaylist: (playlistId) => set((state) => ({
+    library: { ...state.library, playlists: state.library.playlists.filter(p => p.id !== playlistId) }
+  })),
   toggleLikeTrack: (track) => set((state) => {
     const isLiked = state.library.likedSongs.some(t => t.id === track.id);
     const newLiked = isLiked 
@@ -258,30 +349,40 @@ const createOfflineSlice = (set) => ({
   }))
 });
 
+// 6. UI Slice (Transient modals & overlays)
+const createUISlice = (set) => ({
+  ui: { activeModal: null }, // null | 'profile'
+  openModal: (modal) => set(() => ({ ui: { activeModal: modal } })),
+  closeModal: () => set(() => ({ ui: { activeModal: null } })),
+});
+
 // Combine slices into the main store
 export const useAppStore = create(
-  persist(
-    (set, get, api) => ({
-      ...createPreferencesSlice(set, get, api),
-      ...createPlaybackSlice(set, get, api),
-      ...createHistorySlice(set, get, api),
-      ...createLibrarySlice(set, get, api),
-      ...createOfflineSlice(set, get, api),
-    }),
-    {
-      name: 'hear-app-storage',
-      // Explicitly persist user preferences, recent history, and library
-      partialize: (state) => ({ 
-        userPreferences: state.userPreferences,
-        recentHistory: state.recentHistory,
-        library: state.library,
-        offlineMode: {
-          isOfflineMode: state.offlineMode.isOfflineMode,
-          downloadedTracks: state.offlineMode.downloadedTracks,
-          downloadQueue: [] // don't persist queue
-        }
+  subscribeWithSelector(
+    persist(
+      (set, get, api) => ({
+        ...createPreferencesSlice(set, get, api),
+        ...createPlaybackSlice(set, get, api),
+        ...createHistorySlice(set, get, api),
+        ...createLibrarySlice(set, get, api),
+        ...createOfflineSlice(set, get, api),
+        ...createUISlice(set, get, api),
       }),
-      storage: createJSONStorage(() => StorageEngine),
-    }
+      {
+        name: 'hear-app-storage',
+        // Explicitly persist user preferences, recent history, and library
+        partialize: (state) => ({ 
+          userPreferences: state.userPreferences,
+          recentHistory: state.recentHistory,
+          library: state.library,
+          offlineMode: {
+            isOfflineMode: state.offlineMode.isOfflineMode,
+            downloadedTracks: state.offlineMode.downloadedTracks,
+            downloadQueue: [] // don't persist queue
+          }
+        }),
+        storage: createJSONStorage(() => StorageEngine),
+      }
+    )
   )
 );
