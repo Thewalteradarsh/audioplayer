@@ -1,4 +1,5 @@
 import { useState } from 'react';
+import { createPortal } from 'react-dom';
 import { NavLink, Outlet, useLocation, useNavigate } from 'react-router-dom';
 import { Home, Search, Library, User, ChevronLeft, ChevronRight, Heart, Music, X, Check, WifiOff, Download } from 'lucide-react';
 import { useAppStore } from '../store/useAppStore';
@@ -129,9 +130,9 @@ export default function MainLayout() {
       </aside>
 
       {/* Main Content Area */}
-      <main className="flex-1 flex flex-col min-w-0 bg-[#121212] md:rounded-lg md:m-2 md:ml-0 overflow-hidden relative z-0">
+      <main className="flex-1 flex flex-col min-w-0 bg-[#121212] md:rounded-lg md:m-2 md:ml-0 overflow-hidden">
         {/* Topbar (Desktop + Mobile) */}
-        <header className="h-14 md:h-16 pt-[env(safe-area-inset-top)] flex items-center justify-between px-4 md:px-6 bg-[#121212]/90 sticky top-0 z-20 backdrop-blur-md transition-all duration-300 border-b border-white/5 md:border-b-0">
+        <header className="flex-shrink-0 min-h-14 md:min-h-16 pt-[env(safe-area-inset-top)] flex items-center justify-between px-4 md:px-6 bg-[#121212]/90 z-20 backdrop-blur-md transition-all duration-300 border-b border-white/5 md:border-b-0">
           {/* Desktop Navigation Chevrons */}
           <div className="hidden md:flex gap-2">
             <button
@@ -220,13 +221,13 @@ export default function MainLayout() {
       <BottomNav />
 
       {/* Profile / Language Preferences Modal */}
-      {activeModal === 'profile' && (
+      {activeModal === 'profile' && createPortal(
         <div
-          className="fixed inset-0 bg-black/80 backdrop-blur-sm z-[120] flex items-end sm:items-center justify-center p-0 sm:p-4"
+          className="fixed inset-0 bg-black/80 backdrop-blur-sm z-[130] flex items-center justify-center p-3 sm:p-4"
           onClick={closeModal}
         >
           <div
-            className="bg-[#181818] border-t sm:border border-[#282828] w-full sm:max-w-md rounded-t-2xl sm:rounded-xl shadow-2xl p-6 relative max-h-[88dvh] overflow-y-auto"
+            className="bg-[#181818] border border-[#282828] w-full max-w-md rounded-2xl sm:rounded-xl shadow-2xl p-5 sm:p-6 relative max-h-[85dvh] overflow-y-auto"
             onClick={(e) => e.stopPropagation()}
           >
             <button
@@ -326,7 +327,8 @@ export default function MainLayout() {
               </button>
             </div>
           </div>
-        </div>
+        </div>,
+        document.body
       )}
     </div>
   );

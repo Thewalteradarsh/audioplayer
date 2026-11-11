@@ -15,7 +15,7 @@ export default function DashboardView() {
   };
 
   return (
-    <div className="pt-4 md:pt-6 px-4 md:px-8 animate-in fade-in duration-500 max-w-[1800px] mx-auto">
+    <div className="pt-4 md:pt-6 px-4 md:px-8 animate-in fade-in duration-500 max-w-[1800px] mx-auto overflow-x-hidden">
       <div className="mb-6 md:mb-10">
         <h1 className="text-2xl sm:text-3xl md:text-4xl font-bold tracking-tight mb-2">{formatGreeting()}</h1>
         <div className="flex gap-2 flex-wrap items-center">

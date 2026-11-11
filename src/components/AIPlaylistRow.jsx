@@ -53,7 +53,7 @@ export default function AIPlaylistRow({ categoryData }) {
   if (!isLoading && tracks.length === 0) return null;
 
   return (
-    <section className="mb-8 md:mb-10 w-full overflow-hidden">
+    <section className="mb-8 md:mb-10 w-full">
       <div className="mb-4 md:mb-6 flex items-center justify-between gap-2">
         <div className="min-w-0">
            <h2
@@ -77,7 +77,12 @@ export default function AIPlaylistRow({ categoryData }) {
 
       <div className="flex overflow-x-auto custom-scrollbar gap-3.5 md:gap-6 pb-3 md:pb-4 -mx-4 px-4 md:-mx-2 md:px-2 snap-x">
         {isLoading ? (
-          [...Array(5)].map((_, i) => <TrackCardSkeleton key={i} />)
+          [...Array(5)].map((_, i) => (
+            <TrackCardSkeleton
+              key={i}
+              className="min-w-[144px] max-w-[156px] sm:min-w-[160px] sm:max-w-[180px] flex-shrink-0"
+            />
+          ))
         ) : (
           tracks.map((track) => (
             <TrackCard 

@@ -85,7 +85,7 @@ export default function MiniPlayer() {
           </div>
 
           {/* Controls */}
-          <div className="flex items-center gap-2 sm:gap-4 md:gap-5 justify-center flex-shrink-0" onClick={e => e.stopPropagation()}>
+          <div className="flex items-center gap-1.5 sm:gap-4 md:gap-5 justify-center flex-shrink-0" onClick={e => e.stopPropagation()}>
             <button
               type="button"
               aria-label="Toggle shuffle"

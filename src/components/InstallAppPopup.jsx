@@ -32,7 +32,7 @@ export default function InstallAppPopup({
     <div
       role="dialog"
       aria-label="Install Hear App"
-      className="fixed top-[68px] right-3 left-3 sm:left-auto sm:right-6 sm:w-[340px] z-[75] bg-[#1c1c1c]/95 backdrop-blur-lg border border-white/10 rounded-xl shadow-[0_16px_40px_rgba(0,0,0,0.75)] p-3.5 animate-in fade-in slide-in-from-top-2 duration-200"
+      className="fixed top-[calc(3.75rem+env(safe-area-inset-top))] right-3 left-3 sm:left-auto sm:right-6 sm:w-[340px] z-[75] bg-[#1c1c1c]/95 backdrop-blur-lg border border-white/10 rounded-xl shadow-[0_16px_40px_rgba(0,0,0,0.75)] p-3.5 animate-in fade-in slide-in-from-top-2 duration-200"
     >
       <div className="flex items-center gap-3">
         <img

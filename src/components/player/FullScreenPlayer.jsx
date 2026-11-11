@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
 import { useAppStore } from '../../store/useAppStore';
 import { AudioEngine } from '../../services/AudioEngine';
 import { DownloadManager } from '../../services/DownloadManager';
@@ -153,9 +154,9 @@ export default function FullScreenPlayer({ isOpen, onClose }) {
 
   const stopTouch = (e) => e.stopPropagation();
 
-  return (
+  return createPortal(
     <div 
-      className={`fixed inset-0 z-[100] bg-black transition-transform duration-500 ease-[cubic-bezier(0.32,0.72,0,1)] ${isOpen ? 'translate-y-0' : 'translate-y-full pointer-events-none'}`}
+      className={`fixed inset-0 z-[110] bg-black transition-transform duration-500 ease-[cubic-bezier(0.32,0.72,0,1)] ${isOpen ? 'translate-y-0' : 'translate-y-full pointer-events-none'}`}
     >
       {/* Background Blur */}
       <div 
@@ -370,14 +371,14 @@ export default function FullScreenPlayer({ isOpen, onClose }) {
               e.stopPropagation();
               AudioEngine.togglePlayPause();
             }}
-            className="w-20 h-20 rounded-full bg-white flex items-center justify-center text-black hover:scale-105 active:scale-95 transition-transform shadow-[0_0_20px_rgba(255,255,255,0.2)] cursor-pointer"
+            className="w-16 h-16 sm:w-20 sm:h-20 rounded-full bg-white flex items-center justify-center text-black hover:scale-105 active:scale-95 transition-transform shadow-[0_0_20px_rgba(255,255,255,0.2)] cursor-pointer"
           >
             {isLoading ? (
-              <Loader2 size={34} className="animate-spin text-black" />
+              <Loader2 size={30} className="animate-spin text-black sm:w-[34px] sm:h-[34px]" />
             ) : isPlaying ? (
-              <Pause size={36} className="fill-current" />
+              <Pause size={32} className="fill-current sm:w-9 sm:h-9" />
             ) : (
-              <Play size={36} className="fill-current ml-1.5" />
+              <Play size={32} className="fill-current ml-1 sm:w-9 sm:h-9" />
             )}
           </button>
           
@@ -437,6 +438,7 @@ export default function FullScreenPlayer({ isOpen, onClose }) {
           />
         </div>
       </div>
-    </div>
+    </div>,
+    document.body
   );
 }
